@@ -2,9 +2,10 @@
 #include "Network.h"
 #include <algorithm>
 #include <numeric>
+#include <iostream>
 
 //---------------------------------------------------------------------------------------------------------
-Network::Network()
+Network::Network(shared_ptr<spdlog::logger> log_ptr) : log_(log_ptr)
 {
 }
 //---------------------------------------------------------------------------------------------------------
@@ -29,53 +30,48 @@ void Network::_initWeights()
 //---------------------------------------------------------------------------------------------------------
 void Network::_feedInput()
 {
-	out_input_[0] = *next_input_++;
+	input_out_[0] = *next_input_++;
 }
 //---------------------------------------------------------------------------------------------------------
 void Network::_feedTarget()
 {
-	out_target_[0] = *next_target_++;
+	target_[0] = *next_target_++;
 }
 //---------------------------------------------------------------------------------------------------------
 void Network::_feedOmega()
 {
 	auto weight_i = cbegin(weights_);
-	for (auto& omega_i : out_omega_)
+	for (auto& omega_i : omega_out_)
 	{
 		omega_i = 0.;
-		for (auto& input_i : out_input_)
+		for (auto& input_i : input_out_)
 		{
 			omega_i += input_i * *weight_i++;
 		}
 	}
 }
 //---------------------------------------------------------------------------------------------------------
-void Network::_feedError()
+double Network::_feedError()
 {
-	auto omega_i = cbegin(out_omega_);
-	auto target_i = cbegin(out_target_);
-	auto error_i = begin(out_error_);
-	while (error_i != end(out_error_))
+	double sample_error = 0.;
+	auto omega_i = cbegin(omega_out_);
+	auto target_i = cbegin(target_);
+	auto error_i = begin(error_);
+	while (error_i != end(error_))
 	{
-		*error_i++ = *omega_i++ - *target_i++;
+		*error_i = *omega_i++ - *target_i++;
+		sample_error += *error_i / 2.;
+		++error_i;
 	}
+	return sample_error;
 }
 //---------------------------------------------------------------------------------------------------------
-double Network::_error()
+void Network::_correctWeights(double error)
 {
-	return accumulate(cbegin(out_error_), cend(out_error_), 0.);
-}
-//---------------------------------------------------------------------------------------------------------
-void Network::_correctWeights()
-{
-	auto error_i = begin(out_error_);
-	while (error_i != end(out_error_))
+	auto input_out_i = begin(input_out_);
+	for (auto& weight_i : weights_)
 	{
-		const double correction = *error_i++ * 0.001;
-		for (auto& weight_i : weights_)
-		{
-			weight_i -= correction;
-		}
+		weight_i -= *input_out_i++ * 0.001 * error;
 	}
 }
 //---------------------------------------------------------------------------------------------------------
@@ -85,35 +81,49 @@ void Network::init()
 	_initWeights();
 }
 //---------------------------------------------------------------------------------------------------------
-void Network::forward()
+void Network::_forward()
 {
 	_feedInput();
 	_feedOmega();
 }
 //---------------------------------------------------------------------------------------------------------
-void Network::backward()
-{
-	_feedTarget();
-}
-//---------------------------------------------------------------------------------------------------------
 void Network::learn()
 {
 	static constexpr double min_error = 0.00001;
-	double last_error = 0;
-	do
+	while (true)
 	{
+		double error = 0.;
 		next_input_ = cbegin(input_series_);
 		next_target_ = cbegin(target_series_);
+
 		while (next_input_ != end(input_series_))
 		{
-			forward();
-			_feedError();
-			last_error = _error();
-			if (last_error >= min_error)
-			{
-				backward();
-			}
+			_forward();
+			_feedTarget();
+			const double error_p = _feedError();
+			_correctWeights(error_p);
+			error += error_p;
+			log_->info("{:}", *this);
+		}
+
+		if (abs(error) <= min_error)
+		{
+			break;
 		}
 	}
-	while (last_error >= min_error);
+}
+
+std::ostream& Network::write(std::ostream& s) const
+{
+	s << endl << "o(input):" << endl;
+	for_each(begin(input_out_), end(input_out_), [this, &s](const auto& val) { s << '\t' << val; });
+	s << endl << "o(omega):" << endl;
+	for_each(begin(omega_out_), end(omega_out_), [this, &s](const auto& val) { s << '\t' << val; });
+	s << endl << "t(omega):" << endl;
+	for_each(begin(target_), end(target_), [this, &s](const auto& val) { s << '\t' << val; });
+	s << endl << "e(omega):" << endl;
+	for_each(begin(error_), end(error_), [this, &s](const auto& val) { s << '\t' << val; });
+	s << endl << "weights:" << endl;
+	for_each(begin(weights_), end(weights_), [this, &s](const auto& val) { s << '\t' << val; });
+	return s;
 }
